@@ -471,10 +471,11 @@ class SequenceClass:
         # Initialize local cCode.
         cCode = {"Seq1": str(), "Seq2": str(), "Seq3": str(), "Seq4": str()}
 
-        # Initialize the counter of frequency changes
+        # Initialize the counter of frequency changes. We need to know how many freq changes happen in total 
+        # because each one of them takes some time so we need to adjust every sequencer with wait() instructions
         freqChangeCounter = [0] * 4
 
-        # Initiate C loop
+        # Initiate C for loop
         for seq in [1, 2, 3, 4]:
             cCode[f"Seq{seq}"] += f"cvar i{self.loopIndex};\n" + f"for (i{self.loopIndex} = 0; i{self.loopIndex} < {int(rampSteps)}; i{self.loopIndex}++) " + "{\n"
 
@@ -489,23 +490,30 @@ class SequenceClass:
         rampType = RearrangeList(rampType, channel_list, self.channel_structure)
         rampParam = RearrangeList(rampParam, channel_list, self.channel_structure)
 
-        # Initiate parameters
+        # Initialize the wave for each channel
         wave = ["zeros(32)"] * 8
-        # Frequency change counter
-        freqChangeCounter = [0] * 4
 
         # FOR loop over each channel
         for ch, active in enumerate(channels):
             if active:
                 if rampType[ch] == "Exp":
-                    # A*exp(-t/tau) + B
+                    # freqA * exp(-t/tau) + freqB
                     freqA = int(startFreq[ch] - stopFreq[ch])
                     freqB = int(stopFreq[ch])
                     Tau = (rampParam[ch] / duration) * 100
                     ampA = startAmp[ch] - stopAmp[ch]
                     ampB = stopAmp[ch]
 
+                    # Update wave 
                     wave[ch] = f"({ampA} * exp(-1*i{self.loopIndex}/{Tau}) + {ampB}) * square32 + marker32"
+                
+                elif rampType[ch] == "linear":
+                    # freq = mx + freq1
+                    # m = (freq2 - freq1) / (duration)
+                    m = (stopFreq[ch] - startFreq[ch]) / duration
+
+                    # Update wave 
+                    wave[ch] = f"({m} * i{self.loopIndex} + {startFreq[ch]}) * square32 + marker32"
 
                 # Update frequency change counter (because one frequency change command needs to be sandwich by some waiting time)
                 if setFreq:
@@ -515,13 +523,25 @@ class SequenceClass:
                             "\tplayHold(96);\n" + f'\tsetInt("sines/{ch}/harmonic", ({freqA} * exp(-1*i{self.loopIndex}/{Tau}) + {freqB}));\n' + "\tplayHold(96);\n"
                         )
 
+        # How many adjustement need to be done per sequencer
         numOfAdjustmentNeeded = int(max(freqChangeCounter))
+
+        # Numer of samples per iteration of the ramp
         stepSamples = round(TimeToSample(duration) / rampSteps / 16) * 16
+
+        # Write the C code in each sequencer. 
         for seq, totalChanges in enumerate(freqChangeCounter):
             channelIndex = 2 * (seq)
+            # Put the wait instruction if needed
             cCode[f"Seq{seq+1}"] += "\tplayHold(96);\n" * 2 * (numOfAdjustmentNeeded - totalChanges)
+
+            # play the Wave
             cCode[f"Seq{seq+1}"] += f"\tplayWave({wave[channelIndex]},{wave[channelIndex+1]});\n"
+
+            # Hold the waveform for the duration of each iteration
             cCode[f"Seq{seq+1}"] += f"\tplayHold({stepSamples - numOfAdjustmentNeeded * 2 * 96});\n"
+
+            # Close the for loop
             cCode[f"Seq{seq+1}"] += "}\n"
 
             # Update the global cCode
@@ -537,6 +557,40 @@ class SequenceClass:
             self.cCode[f"Seq{int(seq)}"] += cCode
             self.lastAdded_cCode[f"Seq{int(seq)}"] += cCode
 
+    def StartOfSubSequenceRepetition(self):
+        # Update lastAdded_cCode if repetition is needed
+        self.lastAdded_cCode = {"Seq1": str(), "Seq2": str(), "Seq3": str(), "Seq4": str()}
+
+    def EndOfSubSequenceRepetition(self, numberRepetitions):
+        for seq in np.arange(4) + 1:
+            if self.cCode[f"Seq{int(seq)}"].endswith(self.lastAdded_cCode[f"Seq{int(seq)}"]):
+
+                # Remove the last added piece of code
+                self.cCode[f"Seq{int(seq)}"] = self.cCode[f"Seq{int(seq)}"][: -len(self.lastAdded_cCode[f"Seq{int(seq)}"])]
+
+                # Update C Code with while loop
+                self.cCode[f"Seq{int(seq)}"] += (
+                    f"var repetitionIndex{self.loopIndex} = 0;\n"
+                    + f"while (repetitionIndex{int(self.loopIndex)} < {int(numberRepetitions)}) "
+                    + "{\n\t"
+                    + self.lastAdded_cCode[f"Seq{int(seq)}"].replace("\n", "\n\t")
+                    + f"repetitionIndex{self.loopIndex}++;\n"
+                    + "}\n"
+                )
+        self.loopIndex += 1
+
+    def TotalRepetitions(self, numberRepetitions):
+        for seq in np.arange(4) + 1:
+            # Update C Code with while loop
+            self.cCode[f"Seq{int(seq)}"] = (
+                f"var repetitionIndex{self.loopIndex} = 0;\n"
+                + f"while (repetitionIndex{int(self.loopIndex)} < {int(numberRepetitions)}) "
+                + "{\n\t"
+                + self.cCode[f"Seq{int(seq)}"].replace("\n", "\n\t")
+                + f"repetitionIndex{self.loopIndex}++;\n"
+                + "}\n"
+            )
+        self.loopIndex += 1
 
 class DLCZSequence(SequenceClass):
     def LoadMOT(self):
@@ -674,40 +728,25 @@ class DLCZSequence(SequenceClass):
             [1, 1],
         )
 
-    def StartOfSubSequenceRepetition(self):
-        # Update lastAdded_cCode if repetition is needed
-        self.lastAdded_cCode = {"Seq1": str(), "Seq2": str(), "Seq3": str(), "Seq4": str()}
+    def ODMeasurement(self):
+        # Waiting time before measuring the OD
+        self.WaitDuration(self.params["Time of flight [s]"].loc[self.scanIndex])
 
-    def EndOfSubSequenceRepetition(self, numberRepetitions):
-        for seq in np.arange(4) + 1:
-            if self.cCode[f"Seq{int(seq)}"].endswith(self.lastAdded_cCode[f"Seq{int(seq)}"]):
+        # Calculate the start and stop frequencies
+        startFreq = 250 - self.params["Probe Freq range [MHz]"].loc[self.scanIndex] / 2
+        stopFreq = 250 + self.params["Probe Freq range [MHz]"].loc[self.scanIndex] / 2
 
-                # Remove the last added piece of code
-                self.cCode[f"Seq{int(seq)}"] = self.cCode[f"Seq{int(seq)}"][: -len(self.lastAdded_cCode[f"Seq{int(seq)}"])]
-
-                # Update C Code with while loop
-                self.cCode[f"Seq{int(seq)}"] += (
-                    f"var repetitionIndex{self.loopIndex} = 0;\n"
-                    + f"while (repetitionIndex{int(self.loopIndex)} < {int(numberRepetitions)}) "
-                    + "{\n\t"
-                    + self.lastAdded_cCode[f"Seq{int(seq)}"].replace("\n", "\n\t")
-                    + f"repetitionIndex{self.loopIndex}++;\n"
-                    + "}\n"
-                )
-        self.loopIndex += 1
-
-    def TotalRepetitions(self, numberRepetitions):
-        for seq in np.arange(4) + 1:
-            # Update C Code with while loop
-            self.cCode[f"Seq{int(seq)}"] = (
-                f"var repetitionIndex{self.loopIndex} = 0;\n"
-                + f"while (repetitionIndex{int(self.loopIndex)} < {int(numberRepetitions)}) "
-                + "{\n\t"
-                + self.cCode[f"Seq{int(seq)}"].replace("\n", "\n\t")
-                + f"repetitionIndex{self.loopIndex}++;\n"
-                + "}\n"
-            )
-        self.loopIndex += 1
+        # Send a probe with a ramp of detunings
+        self.RampAOM(["Write"],
+        100e-6,            # During 100 microseconds
+        startFreq,
+        stopFreq,
+        [0.15],
+        [0.15],
+        ["linear"],
+        [0],                # waveParam has no effect for linear ramp
+        rampSteps = int(self.params["Probe Freq range [MHz]"].loc[self.scanIndex]),
+        )
 
 
 def TimeToSample(time_duration):
