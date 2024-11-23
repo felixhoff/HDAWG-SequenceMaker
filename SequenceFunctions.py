@@ -5,6 +5,7 @@ from pathlib import Path
 from datetime import datetime
 import time
 import sys
+import matplotlib as plt
 
 
 class SequenceClass:
@@ -12,6 +13,7 @@ class SequenceClass:
         # Load parameter file
         self.params = parameter_file
         self.experimentPath = experimentPath
+        self.NumberOfRuns = self.params.shape[0] # Total number of runs that we want to do is number of rows in the param file
 
         # Initialize C code string
         self.cCode = {"Seq1": str(), "Seq2": str(), "Seq3": str(), "Seq4": str()}
@@ -46,9 +48,14 @@ class SequenceClass:
             "risingGauss": "gauss",
             "fallingGauss": "gauss",
         }
-        self.myTimetags = {f"Run{i}": {f"{channel}": [] for channel in channel_structure} for i in range(len(self.params))}
 
-        self.myCounts = {f"Run{i}": {f"{channel}": [] for channel in channel_structure} for i in range(len(self.params))}
+        # Initialize the timetags
+        self.myTimetags = {f"Run{i}": {f"{channel}": [] for channel in channel_structure} for i in range(self.NumberOfRuns)}
+        self.myCounts = {f"Run{i}": {f"{channel}": [] for channel in channel_structure} for i in range(self.NumberOfRuns)}
+
+        # Initialize the plot parameters
+        self.StartStop = []
+        self.Correlation = []
 
     def ConnectAndConfigure(self, device_id, server_host):
         """
@@ -135,7 +142,7 @@ class SequenceClass:
             self.isCounterInitialized = True
             self.clockbase = float(self.daq.getInt(f"/{self.device_id}/clockbase"))
 
-    def GatherData(self, channel_list, pollTime):
+    def GatherData(self, channel_list, pollTime, doPlot = True):
         timeTags = {}
         countNumber = {}
         counterNumber = np.arange(len(channel_list))
@@ -151,12 +158,47 @@ class SequenceClass:
                 timeTags[f"{channel}"] = counterData_i["timestamp"] / self.clockbase
                 countNumber[f"{channel}"] = counterData_i["counter"]
             except:
-                print("\nWARNING : counter " + str(counter) + " empty")
+                #print("\nWARNING : counter " + str(counter) + " empty")
                 timeTags[f"{channel}"] = []
                 countNumber[f"{channel}"] = []
 
             self.myTimetags[f"Run{self.scanIndex}"][f"{channel}"] = np.concatenate((self.myTimetags[f"Run{self.scanIndex}"][f"{channel}"], timeTags[f"{channel}"]))
             self.myCounts[f"Run{self.scanIndex}"][f"{channel}"] = np.concatenate((self.myCounts[f"Run{self.scanIndex}"][f"{channel}"], countNumber[f"{channel}"]))
+        
+        if doPlot:
+            self.LivePlot()
+
+    def InitFig(NumSubplots):
+        """
+        Initialize a figure with a specified number of subplots, arranged aesthetically.
+
+        Parameters:
+        NumSubplots (int): Number of subplots to create.
+
+        Returns:
+        fig: The figure object.
+        axes: A list of subplot axes objects.
+        """
+        # Calculate grid size (rows, cols) to minimize empty subplots
+        cols = int(np.ceil(np.sqrt(NumSubplots)))  # Columns are the square root rounded up
+        rows = int(np.ceil(NumSubplots / cols))   # Rows are calculated to fit all subplots
+
+        fig, axes = plt.subplots(rows, cols, figsize=(cols * 4, rows * 3))
+        axes = np.ravel(axes)  # Flatten the array of axes
+
+        # Turn off unused subplots
+        for i in range(NumSubplots, len(axes)):
+            fig.delaxes(axes[i])
+
+        return fig, axes[:NumSubplots]  # Return the figure and the necessary axes
+
+    def LivePlot(self, timeTags, countNumber):
+        if not plt.fignum_exists(1):    # If the figure doe snot exist, create it
+            NumSubplots = len(self.StartStop) + len(self.Correlation)   # Number of subplots required
+            self.InitFig(NumSubplots)  
+
+        # To finish here : plot the desired histograms or correlation plots.
+        # Need to think about plotting only with the polled data, but adding it to the plot 
 
     def StartRecordingData(self, channel_list, pollTime):
 
@@ -169,7 +211,7 @@ class SequenceClass:
         while self.device.awgs[0].sequencer.status():  # While Sequencer is running
             self.GatherData(channel_list, pollTime)
 
-        self.GatherData(channel_list, 5)  # Gather data one last time in case we missed some
+        self.GatherData(channel_list, 2)  # Gather data one last time in case we missed some
 
     def StopRecordingData(self, channel_list):
         counterNumber = np.arange(len(channel_list))
@@ -466,7 +508,7 @@ class SequenceClass:
             self.cCode[f"Seq{int(seq)}"] += cCode[f"Seq{int(seq)}"]
             self.lastAdded_cCode[f"Seq{int(seq)}"] += cCode[f"Seq{int(seq)}"]
 
-    def RampAOM(self, channel_list, duration, startFreq, stopFreq, startAmp, stopAmp, rampType, rampParam, rampSteps=100, setFreq=True):
+    def RampAOM(self, channel_list, duration, startFreq, stopFreq, startAmp, stopAmp, rampType, rampParam, rampSteps=100, marker = [True] * 8, setFreq=True):
 
         # Initialize local cCode.
         cCode = {"Seq1": str(), "Seq2": str(), "Seq3": str(), "Seq4": str()}
@@ -505,7 +547,9 @@ class SequenceClass:
                     ampB = stopAmp[ch]
 
                     # Update wave 
-                    wave[ch] = f"({ampA} * exp(-1*i{self.loopIndex}/{Tau}) + {ampB}) * square32 + marker32"
+                    wave[ch] = f"({ampA} * exp(-1*i{self.loopIndex}/{Tau}) + {ampB}) * square32"
+                    if marker[ch]:
+                        wave[ch] += " + marker32"
                 
                 elif rampType[ch] == "linear":
                     # freq = mx + freq1
@@ -513,7 +557,9 @@ class SequenceClass:
                     m = (stopFreq[ch] - startFreq[ch]) / duration
 
                     # Update wave 
-                    wave[ch] = f"({m} * i{self.loopIndex} + {startFreq[ch]}) * square32 + marker32"
+                    wave[ch] = f"({m} * i{self.loopIndex} + {startFreq[ch]}) * square32"
+                    if marker[ch]:
+                        wave[ch] += " + marker32"
 
                 # Update frequency change counter (because one frequency change command needs to be sandwich by some waiting time)
                 if setFreq:
