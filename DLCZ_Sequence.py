@@ -2,6 +2,7 @@ import SequenceFunctions as SF
 import pandas as pd
 import pathlib as pt
 import time
+import numpy as np
 
 # Path where the data will be saved
 experimentPath = pt.Path(r"Y:\Experiments\Rydberg\HDAWG\Initial_tests\Felix\Test")
@@ -30,13 +31,18 @@ server_host = "10.3.20.143"
 MySequence = SF.RydbergSequence(params, channel_structure, experimentPath)
 MySequence.ConnectAndConfigure(device_id, server_host)
 
+# Plot Params
+MySequence.StartStop = [["Write", "Read"], ["ZeemanPump", "Read"]]
+MySequence.timeAfterStart = [1e-6, 1e-3]
+MySequence.windowDuration = [100e-6, 50e-6]
+MySequence.binNumber = [100, 100]
+MySequence.Y = [np.zeros(binNumber) for binNumber in MySequence.binNumber]
+
 ###############################################
 ### Loop over the number of runs to perform ###
 ###############################################
 
-NumberOfRuns = params.shape[0]  # Total number of runs that we want to do is number of rows in the param file
-
-while MySequence.scanIndex < NumberOfRuns:
+while MySequence.scanIndex < MySequence.NumberOfRuns:
 
     # Reset sequence instance
     MySequence.ResetSequence()
@@ -65,10 +71,3 @@ while MySequence.scanIndex < NumberOfRuns:
 
     # Increment
     MySequence.scanIndex += 1
-
-#%%
-import matplotlib.pyplot as plt
-
-plt.plot(MySequence.myCounts[f"Run{MySequence.scanIndex-1}"]["repump"])
-plt.xlabel("Counter array index")
-plt.ylabel("Counter array value")
